@@ -64,7 +64,7 @@ if make:
                     segment=work/f"segment_{i:03d}.mp4"
                     cmd=[ffmpeg,"-y","-loop","1","-i",str(image_path),"-i",str(audio_path),
                          "-c:v","libx264","-tune","stillimage","-c:a","aac","-b:a","128k",
-                         "-pix_fmt","yuv420p","-shortest","-vf",f"scale={size[0]}:{size[1]",
+                         "-pix_fmt","yuv420p","-shortest","-vf",f"scale={size[0]}:{size[1]}",
                          "-r","25",str(segment)]
                     subprocess.run(cmd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
                     files.append(segment)
