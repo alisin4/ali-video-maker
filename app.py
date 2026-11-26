@@ -1,282 +1,235 @@
 import streamlit as st
 import os
-import tempfile
-import subprocess
-import textwrap
-import shutil
 import asyncio
-from pathlib import Path
-
-import edge_tts
+import subprocess
+import tempfile
+import gc
+import re
+import shutil
 from PIL import Image, ImageDraw, ImageFont
+import edge_tts
 
-st.set_page_config(
-    page_title="ALI VIDEO MAKER",
-    page_icon="🎬",
-    layout="centered"
-)
+st.set_page_config(page_title="ALI VIDEO MAKER", page_icon="🎬")
 
 st.title("🎬 ALI VIDEO MAKER")
-st.caption("Create narrated videos from your script")
+st.caption("Lightweight Script-to-Video Studio")
 
-st.markdown("### 🎥 Video Studio")
-
-script = st.text_area(
-    "Your scenario",
-    height=220,
-    placeholder="Write your video scenario here..."
-)
-
-voice_choice = st.selectbox(
-    "Narration language",
-    ["Persian/Dari", "English"]
-)
-
-format_choice = st.selectbox(
-    "Video format",
-    ["Vertical 9:16", "Landscape 16:9"]
-)
-
-title = st.text_input("Video title", "My Video")
-
-make = st.button("🎬 Create Video", type="primary")
-
+WIDTH = 480
+HEIGHT = 854
+FPS = 20
+MAX_SCENES = 6
 
 def split_scenes(text):
-    scenes = [
-        s.strip()
-        for s in text.replace("\r", "").split("\n\n")
-        if s.strip()
-    ]
+    parts = re.split(r'(?<=[.!؟])\s+|\n+', text.strip())
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts[:MAX_SCENES]
 
-    if len(scenes) <= 1:
-        scenes = [
-            s.strip()
-            for s in text.replace("؟", "?").split(".")
-            if s.strip()
-        ]
-
-    return scenes[:12]
-
-
-async def create_voice(text, filename, language):
-    if language == "Persian/Dari":
-        voice = "fa-IR-FaridNeural"
-    else:
-        voice = "en-US-GuyNeural"
-
-    communicate = edge_tts.Communicate(
-        text,
-        voice
-    )
-
-    await communicate.save(filename)
-
-
-def make_image(text, filename, size, number):
-    img = Image.new("RGB", size, (18, 22, 35))
-    draw = ImageDraw.Draw(img)
-
-    draw.rectangle(
-        (0, 0, size[0], 18),
-        fill=(212, 170, 75)
-    )
-
-    draw.rectangle(
-        (0, size[1] - 18, size[0], size[1]),
-        fill=(212, 170, 75)
-    )
-
-    font = None
-
-    font_paths = [
+def get_font():
+    paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
     ]
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
 
-    for path in font_paths:
-        if os.path.exists(path):
-            try:
-                font = ImageFont.truetype(path, 55)
-                break
-            except Exception:
-                pass
+def create_image(text, path):
+    img = Image.new("RGB", (WIDTH, HEIGHT), (20, 20, 30))
+    draw = ImageDraw.Draw(img)
 
-    if font is None:
-        font = ImageFont.load_default()
+    font_path = get_font()
+    font = ImageFont.truetype(font_path, 28) if font_path else ImageFont.load_default()
 
-    wrapped = textwrap.fill(text, width=26)
+    # Persian text shaping and RTL
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        text = get_display(arabic_reshaper.reshape(text))
+    except Exception:
+        pass
 
-    draw.multiline_text(
-        (size[0] // 2, size[1] // 2),
-        wrapped,
-        fill="white",
-        font=font,
-        anchor="mm",
-        align="center",
-        spacing=25
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = current + " " + word if current else word
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] <= WIDTH - 50:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    line_height = 42
+    total_height = len(lines) * line_height
+    y = max(60, (HEIGHT - total_height) // 2)
+
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_width = bbox[2] - bbox[0]
+        x = (WIDTH - text_width) // 2
+        draw.text((x, y), line, font=font, fill="white")
+        y += line_height
+
+    img.save(path, "JPEG", quality=75)
+    del img, draw
+    gc.collect()
+
+async def create_voice(text, path):
+    communicate = edge_tts.Communicate(
+        text,
+        "fa-IR-FaridNeural"
     )
+    await communicate.save(path)
 
-    draw.text(
-        (50, 50),
-        str(number),
-        fill=(212, 170, 75),
-        font=font
+def get_duration(path):
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path
+        ],
+        capture_output=True,
+        text=True,
+        check=True
     )
+    return float(result.stdout.strip())
 
-    img.save(filename)
-
-
-def render_video(image, audio, output, size):
-    width, height = size
+def make_segment(image, audio, output):
+    duration = get_duration(audio)
 
     command = [
-        "ffmpeg",
-        "-y",
+        "ffmpeg", "-y",
         "-loop", "1",
-        "-i", str(image),
-        "-i", str(audio),
-        "-vf",
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},"
-        f"zoompan=z='min(zoom+0.0005,1.08)':"
-        f"x='iw/2-(iw/zoom/2)':"
-        f"y='ih/2-(ih/zoom/2)':"
-        f"d=125:s={width}x{height}:fps=25",
+        "-i", image,
+        "-i", audio,
+        "-t", str(duration),
+        "-vf", f"scale={WIDTH}:{HEIGHT},fps={FPS}",
         "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-threads", "1",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "128k",
+        "-b:a", "64k",
         "-shortest",
-        "-r", "25",
-        str(output)
+        output
     ]
 
     subprocess.run(
         command,
         check=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE
+        stderr=subprocess.DEVNULL
     )
 
+def join_segments(files, output, folder):
+    list_file = os.path.join(folder, "list.txt")
 
-if make:
+    with open(list_file, "w") as f:
+        for file in files:
+            f.write("file '{}'\n".format(file.replace("'", "'\\''")))
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_file,
+            "-c", "copy",
+            output
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+st.subheader("📝 Script")
+
+script = st.text_area(
+    "Enter your script",
+    height=250,
+    placeholder="داستان خود را اینجا بنویسید..."
+)
+
+if st.button("🎬 Create Video", use_container_width=True):
 
     if not script.strip():
-        st.warning("Please enter your scenario.")
+        st.warning("Please enter a script.")
 
     else:
 
-        ffmpeg = shutil.which("ffmpeg")
+        folder = tempfile.mkdtemp(prefix="ali_video_")
 
-        if not ffmpeg:
-            st.error("FFmpeg is not installed.")
-        else:
+        try:
+            scenes = split_scenes(script)
 
-            try:
+            if not scenes:
+                st.warning("No scenes found.")
+                st.stop()
 
-                scenes = split_scenes(script)
+            progress = st.progress(0)
+            status = st.empty()
 
-                work = Path(tempfile.mkdtemp())
+            segment_files = []
 
-                segments = []
+            for i, scene in enumerate(scenes):
 
-                size = (
-                    (1080, 1920)
-                    if format_choice.startswith("Vertical")
-                    else (1920, 1080)
-                )
+                status.write(f"Processing scene {i+1}/{len(scenes)}")
 
-                progress = st.progress(0)
+                image_path = os.path.join(folder, f"img_{i}.jpg")
+                audio_path = os.path.join(folder, f"audio_{i}.mp3")
+                segment_path = os.path.join(folder, f"segment_{i}.mp4")
 
-                status = st.empty()
+                create_image(scene, image_path)
 
-                for i, scene in enumerate(scenes):
+                asyncio.run(create_voice(scene, audio_path))
 
-                    status.write(
-                        f"Creating scene {i+1}/{len(scenes)}..."
-                    )
+                make_segment(image_path, audio_path, segment_path)
 
-                    image_path = work / f"scene_{i}.png"
+                segment_files.append(segment_path)
 
-                    audio_path = work / f"audio_{i}.mp3"
+                progress.progress((i + 1) / len(scenes))
 
-                    segment_path = work / f"segment_{i}.mp4"
+                gc.collect()
 
-                    make_image(
-                        scene,
-                        image_path,
-                        size,
-                        i + 1
-                    )
+            status.write("Joining video...")
 
-                    language = voice_choice
+            video_file = os.path.join(folder, "ALI_VIDEO.mp4")
 
-                    asyncio.run(
-                        create_voice(
-                            scene,
-                            str(audio_path),
-                            language
-                        )
-                    )
+            join_segments(segment_files, video_file, folder)
 
-                    render_video(
-                        image_path,
-                        audio_path,
-                        segment_path,
-                        size
-                    )
+            status.empty()
+            progress.empty()
 
-                    segments.append(segment_path)
+            st.success("✅ Video created successfully!")
 
-                    progress.progress(
-                        (i + 1) / len(scenes)
-                    )
+            st.video(video_file)
 
-                status.write("Combining scenes...")
+            with open(video_file, "rb") as f:
+                video_bytes = f.read()
 
-                list_file = work / "list.txt"
+            st.download_button(
+                label="⬇️ Download MP4",
+                data=video_bytes,
+                file_name="ALI_VIDEO.mp4",
+                mime="video/mp4",
+                use_container_width=True
+            )
 
-                with open(
-                    list_file,
-                    "w",
-                    encoding="utf-8"
-                ) as f:
+            del video_bytes
+            gc.collect()
 
-                    for segment in segments:
-                        f.write(
-                            f"file '{segment.as_posix()}'\n"
-                        )
+        except Exception as e:
+            st.error(f"Video creation failed: {e}")
 
-                final_video = work / "final_video.mp4"
-
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-f", "concat",
-                        "-safe", "0",
-                        "-i", str(list_file),
-                        "-c", "copy",
-                        str(final_video)
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE
-                )
-                st.success("✅ Video created successfully!")
-
-                st.video(video_file)
-
-                with open(video_file, "rb") as f:
-                    st.download_button(
-                        label="⬇️ Download MP4",
-                        data=f.read(),
-                        file_name="ALI_VIDEO.mp4",
-                        mime="video/mp4",
-                        key="video_download"
-                    )
-
-            except Exception as e:
-                st.error(f"Video creation failed: {e}")
-             
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+            gc.collect()
