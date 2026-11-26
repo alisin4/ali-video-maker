@@ -1,81 +1,288 @@
 import streamlit as st
-import os, tempfile, subprocess, textwrap, shutil
+import os
+import tempfile
+import subprocess
+import textwrap
+import shutil
+import asyncio
 from pathlib import Path
 
-st.set_page_config(page_title="ALI VIDEO MAKER", page_icon="🎬", layout="centered")
+import edge_tts
+from PIL import Image, ImageDraw, ImageFont
+
+st.set_page_config(
+    page_title="ALI VIDEO MAKER",
+    page_icon="🎬",
+    layout="centered"
+)
+
 st.title("🎬 ALI VIDEO MAKER")
-st.caption("Turn a script into a narrated cinematic video (free-resource workflow)")
+st.caption("Create narrated videos from your script")
 
-st.info("This starter creates a narrated slideshow video from your script using scene cards, TTS and FFmpeg. AI image generation APIs are not included; add a provider later if desired.")
+st.markdown("### 🎥 Video Studio")
 
-script = st.text_area("Your scenario", height=220, placeholder="Paste your complete scenario here...")
-voice = st.selectbox("Narration language", ["Persian/Dari", "English"])
-format_choice = st.selectbox("Video format", ["Vertical 9:16 (Reels/Shorts)", "Landscape 16:9"])
-title = st.text_input("Video title", "My video")
-make = st.button("🎬 Create MP4", type="primary")
+script = st.text_area(
+    "Your scenario",
+    height=220,
+    placeholder="Write your video scenario here..."
+)
 
-def split_scenes(txt):
-    chunks=[x.strip() for x in txt.replace("\r","").split("\n\n") if x.strip()]
-    if len(chunks)<=1:
-        sentences=[x.strip() for x in txt.replace("؟","?").split(".") if x.strip()]
-        chunks=sentences or [txt.strip()]
-    return chunks[:12]
+voice_choice = st.selectbox(
+    "Narration language",
+    ["Persian/Dari", "English"]
+)
+
+format_choice = st.selectbox(
+    "Video format",
+    ["Vertical 9:16", "Landscape 16:9"]
+)
+
+title = st.text_input("Video title", "My Video")
+
+make = st.button("🎬 Create Video", type="primary")
+
+
+def split_scenes(text):
+    scenes = [
+        s.strip()
+        for s in text.replace("\r", "").split("\n\n")
+        if s.strip()
+    ]
+
+    if len(scenes) <= 1:
+        scenes = [
+            s.strip()
+            for s in text.replace("؟", "?").split(".")
+            if s.strip()
+        ]
+
+    return scenes[:12]
+
+
+async def create_voice(text, filename, language):
+    if language == "Persian/Dari":
+        voice = "fa-IR-FaridNeural"
+    else:
+        voice = "en-US-GuyNeural"
+
+    communicate = edge_tts.Communicate(
+        text,
+        voice
+    )
+
+    await communicate.save(filename)
+
+
+def make_image(text, filename, size, number):
+    img = Image.new("RGB", size, (18, 22, 35))
+    draw = ImageDraw.Draw(img)
+
+    draw.rectangle(
+        (0, 0, size[0], 18),
+        fill=(212, 170, 75)
+    )
+
+    draw.rectangle(
+        (0, size[1] - 18, size[0], size[1]),
+        fill=(212, 170, 75)
+    )
+
+    font = None
+
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
+    ]
+
+    for path in font_paths:
+        if os.path.exists(path):
+            try:
+                font = ImageFont.truetype(path, 55)
+                break
+            except Exception:
+                pass
+
+    if font is None:
+        font = ImageFont.load_default()
+
+    wrapped = textwrap.fill(text, width=26)
+
+    draw.multiline_text(
+        (size[0] // 2, size[1] // 2),
+        wrapped,
+        fill="white",
+        font=font,
+        anchor="mm",
+        align="center",
+        spacing=25
+    )
+
+    draw.text(
+        (50, 50),
+        str(number),
+        fill=(212, 170, 75),
+        font=font
+    )
+
+    img.save(filename)
+
+
+def render_video(image, audio, output, size):
+    width, height = size
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-loop", "1",
+        "-i", str(image),
+        "-i", str(audio),
+        "-vf",
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},"
+        f"zoompan=z='min(zoom+0.0005,1.08)':"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"d=125:s={width}x{height}:fps=25",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-shortest",
+        "-r", "25",
+        str(output)
+    ]
+
+    subprocess.run(
+        command,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE
+    )
+
 
 if make:
+
     if not script.strip():
         st.warning("Please enter your scenario.")
+
     else:
-        ffmpeg=shutil.which("ffmpeg")
+
+        ffmpeg = shutil.which("ffmpeg")
+
         if not ffmpeg:
-            st.error("FFmpeg is not installed in this environment. Add it through packages.txt and redeploy.")
+            st.error("FFmpeg is not installed.")
         else:
+
             try:
-                from gtts import gTTS
-                from PIL import Image, ImageDraw, ImageFont
-                scenes=split_scenes(script)
-                work=Path(tempfile.mkdtemp())
-                files=[]
-                size=(1080,1920) if format_choice.startswith("Vertical") else (1920,1080)
-                # Find a suitable font, fallback to default.
-                font_path=None
-                for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                          "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"]:
-                    if os.path.exists(p): font_path=p; break
-                font=ImageFont.truetype(font_path, 54) if font_path else ImageFont.load_default()
-                for i,scene in enumerate(scenes):
-                    img=Image.new("RGB",size,(20,24,38))
-                    draw=ImageDraw.Draw(img)
-                    # subtle decorative bars
-                    draw.rectangle((0,0,size[0],22),fill=(220,170,70))
-                    draw.rectangle((0,size[1]-22,size[0],size[1]),fill=(220,170,70))
-                    margin=int(size[0]*.09)
-                    wrapped=textwrap.fill(scene,width=28 if size[0]<1500 else 48)
-                    bbox=draw.multiline_textbbox((0,0),wrapped,font=font,spacing=24,align="center")
-                    h=bbox[3]-bbox[1]
-                    y=(size[1]-h)//2
-                    draw.text((size[0]//2,y),wrapped,font=font,fill=(255,255,255),spacing=24,align="center",anchor="mm")
-                    draw.text((margin,margin),f"{i+1:02d}",font=font,fill=(220,170,70))
-                    image_path=work/f"scene_{i:03d}.png"
-                    img.save(image_path)
-                    audio_path=work/f"scene_{i:03d}.mp3"
-                    lang="fa" if voice=="Persian/Dari" else "en"
-                    gTTS(scene,lang=lang).save(str(audio_path))
-                    # render a video segment with still image and voice
-                    segment=work/f"segment_{i:03d}.mp4"
-                    cmd=[ffmpeg,"-y","-loop","1","-i",str(image_path),"-i",str(audio_path),
-                         "-c:v","libx264","-tune","stillimage","-c:a","aac","-b:a","128k",
-                         "-pix_fmt","yuv420p","-shortest","-vf",f"scale={size[0]}:{size[1]}",
-                         "-r","25",str(segment)]
-                    subprocess.run(cmd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
-                    files.append(segment)
-                listfile=work/"concat.txt"
-                listfile.write_text("\n".join(f"file '{f.as_posix()}'" for f in files),encoding="utf-8")
-                output=work/"ali_video.mp4"
-                subprocess.run([ffmpeg,"-y","-f","concat","-safe","0","-i",str(listfile),
-                               "-c","copy",str(output)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
-                st.success("Video created!")
-                st.video(str(output))
-                st.download_button("⬇️ Download MP4",output.read_bytes(),file_name="ali_video.mp4",mime="video/mp4")
+
+                scenes = split_scenes(script)
+
+                work = Path(tempfile.mkdtemp())
+
+                segments = []
+
+                size = (
+                    (1080, 1920)
+                    if format_choice.startswith("Vertical")
+                    else (1920, 1080)
+                )
+
+                progress = st.progress(0)
+
+                status = st.empty()
+
+                for i, scene in enumerate(scenes):
+
+                    status.write(
+                        f"Creating scene {i+1}/{len(scenes)}..."
+                    )
+
+                    image_path = work / f"scene_{i}.png"
+
+                    audio_path = work / f"audio_{i}.mp3"
+
+                    segment_path = work / f"segment_{i}.mp4"
+
+                    make_image(
+                        scene,
+                        image_path,
+                        size,
+                        i + 1
+                    )
+
+                    language = voice_choice
+
+                    asyncio.run(
+                        create_voice(
+                            scene,
+                            str(audio_path),
+                            language
+                        )
+                    )
+
+                    render_video(
+                        image_path,
+                        audio_path,
+                        segment_path,
+                        size
+                    )
+
+                    segments.append(segment_path)
+
+                    progress.progress(
+                        (i + 1) / len(scenes)
+                    )
+
+                status.write("Combining scenes...")
+
+                list_file = work / "list.txt"
+
+                with open(
+                    list_file,
+                    "w",
+                    encoding="utf-8"
+                ) as f:
+
+                    for segment in segments:
+                        f.write(
+                            f"file '{segment.as_posix()}'\n"
+                        )
+
+                final_video = work / "final_video.mp4"
+
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-f", "concat",
+                        "-safe", "0",
+                        "-i", str(list_file),
+                        "-c", "copy",
+                        str(final_video)
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+
+                status.success("Video created successfully!")
+
+                st.video(str(final_video))
+
+                with open(
+                    final_video,
+                    "rb"
+                ) as video_file:
+
+                    st.download_button(
+                        "⬇️ Download MP4",
+                        video_file,
+                        file_name="ALI_VIDEO.mp4",
+                        mime="video/mp4"
+                    )
+
             except Exception as e:
-                st.error(f"Video creation failed: {e}")
-                st.caption("Check the deployment logs if this continues.")
+
+                st.error(
+                    f"Video creation failed: {e}"
+                )
