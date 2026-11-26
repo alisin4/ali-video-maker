@@ -264,25 +264,19 @@ if make:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE
                 )
+                st.success("✅ Video created successfully!")
 
-                status.success("Video created successfully!")
+                st.video(video_file)
 
-                st.video(str(final_video))
-
-                with open(
-                    final_video,
-                    "rb"
-                ) as video_file:
-
+                with open(video_file, "rb") as f:
                     st.download_button(
-                        "⬇️ Download MP4",
-                        video_file,
+                        label="⬇️ Download MP4",
+                        data=f.read(),
                         file_name="ALI_VIDEO.mp4",
-                        mime="video/mp4"
+                        mime="video/mp4",
+                        key="video_download"
                     )
 
             except Exception as e:
-
-                st.error(
-                    f"Video creation failed: {e}"
-                )
+                st.error(f"Video creation failed: {e}")
+             
